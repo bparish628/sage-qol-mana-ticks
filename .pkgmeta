@@ -1,0 +1,7 @@
+package-as: SageQoL_ManaTicks
+
+ignore:
+  - scripts
+  - package.json
+  - package-lock.json
+  - .cache

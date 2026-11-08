@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Sage QoL: Mana Ticks
+## Notes: Shows the five-second rule and mana regen ticks as a spark on your mana bar, plus a mana bar for druids in forms.
+## Author: bparish628
+## Version: @project-version@
+## IconTexture: Interface\Icons\Spell_Nature_Lightning
+## Category: Sage QoL
+
+ManaTicks.lua
