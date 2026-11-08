@@ -2,15 +2,15 @@ local CONFIG = {
 	waitSeconds = 5,
 	tickSeconds = 2,
 	spark = {
-		texture = "Interface\\CastingBar\\UI-CastingBar-Spark",
-		width = 14,
-		extraHeight = 8,
+		atlas = "ui-castingbar-pip",
+		width = 6,
+		extraHeight = 6,
 		waitColor = { 1, 0.85, 0.4, 0.9 },
 		tickColor = { 0.6, 0.9, 1, 0.9 },
 	},
 	druidBar = {
 		height = 10,
-		offsetY = -14,
+		offsetY = -4,
 		borderColor = { 0, 0, 0, 1 },
 		backgroundColor = { 0, 0, 0, 0.6 },
 		font = "GameFontHighlightSmall",
@@ -73,8 +73,7 @@ local function GetSpark(bar)
 	local spark = sparks[bar]
 	if not spark then
 		spark = bar:CreateTexture(nil, "OVERLAY", nil, 7)
-		spark:SetTexture(CONFIG.spark.texture)
-		spark:SetBlendMode("ADD")
+		spark:SetAtlas(CONFIG.spark.atlas)
 		spark:SetSize(CONFIG.spark.width, bar:GetHeight() + CONFIG.spark.extraHeight)
 		spark:Hide()
 		sparks[bar] = spark
@@ -158,19 +157,18 @@ local function LogManaChange(mana, now)
 	lastLogTime = now
 end
 
-local function OnPowerUpdate()
-	local maxMana = UnitPowerMax("player", MANA)
-	if maxMana > 0 then
-		local mana, now = UnitPower("player", MANA), GetTime()
-		LogManaChange(mana, now)
-		ApplyManaChange(mana, maxMana, now)
-	end
-	Refresh()
-end
-
+-- Mana is polled because Forever did not send a mana update while a druid was in cat or bear form.
 local function OnUpdate()
 	local now = GetTime()
-	ExpireWait(UnitPower("player", MANA), UnitPowerMax("player", MANA), now)
+	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	if maxMana > 0 and mana ~= regen.lastMana then
+		LogManaChange(mana, now)
+		ApplyManaChange(mana, maxMana, now)
+		if druidBar and druidBar:IsShown() then
+			UpdateDruidBar(mana, maxMana)
+		end
+	end
+	ExpireWait(mana, maxMana, now)
 	local progress, color = SparkProgress(now)
 	for _, bar in ipairs(activeBars) do
 		if progress then
@@ -187,17 +185,12 @@ driver:RegisterEvent("PLAYER_DEAD")
 driver:RegisterEvent("PLAYER_ALIVE")
 driver:RegisterEvent("PLAYER_UNGHOST")
 driver:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
-driver:RegisterUnitEvent("UNIT_POWER_UPDATE", "player")
 driver:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 driver:RegisterUnitEvent("UNIT_DISPLAYPOWER", "player")
-driver:SetScript("OnEvent", function(_, event, _, powerToken)
+driver:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_ENTERING_WORLD" then
 		ResetRegen(UnitPower("player", MANA), UnitPowerMax("player", MANA), GetTime())
 		Refresh()
-	elseif event == "UNIT_POWER_UPDATE" then
-		if powerToken == "MANA" then OnPowerUpdate() end
-	elseif event == "UNIT_MAXPOWER" then
-		OnPowerUpdate()
 	else
 		Refresh()
 	end
