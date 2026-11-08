@@ -1,6 +1,10 @@
 local CONFIG = {
 	waitSeconds = 5,
 	tickSeconds = 2,
+	-- A mana event this soon after a mana-costing cast is the cost landing, not a tick.
+	spendEchoSeconds = 0.5,
+	-- With mana hidden, regen counts as stopped (mana full) after this long without a tick.
+	stalledSeconds = 2.5,
 	spark = {
 		atlas = "ui-castingbar-pip",
 		width = 6,
@@ -18,53 +22,84 @@ local CONFIG = {
 }
 
 local MANA = Enum.PowerType.Mana
+local PREFIX = "|cff66ccffMana Ticks|r "
 
-local regen = { phase = "full", since = 0, lastMana = 0, lastTickAt = nil }
+-- waitStart: when the last mana-costing cast landed (start of the five-second rule).
+-- lastTickAt: when mana last arrived from regen; ticks follow a fixed two-second clock from it.
+-- lastMana: last readable mana, used to tell a tick from a spend when mana isn't hidden.
+local regen = { waitStart = nil, lastTickAt = nil, lastMana = nil }
 local sparks = {}
 local druidBar
 local activeBars = {}
+local logUntil, lastLogAt = 0, nil
 
-local function ResetRegen(mana, maxMana, now)
-	regen.lastMana = mana
-	regen.lastTickAt = nil
-	regen.phase = mana >= maxMana and "full" or "ticking"
-	regen.since = now
+-- Forever returns mana as a secret value while a druid's form uses another power.
+-- Secrets error on comparison or math but can be handed to widgets, which draw them.
+local function IsSecret(value)
+	return issecretvalue ~= nil and issecretvalue(value)
 end
 
-local function ApplyManaChange(mana, maxMana, now)
-	if mana < regen.lastMana then
-		regen.phase = "waiting"
-		regen.since = now
-	elseif mana > regen.lastMana then
-		regen.lastTickAt = now
-		if regen.phase ~= "waiting" or now - regen.since >= CONFIG.waitSeconds then
-			regen.phase = "ticking"
-			regen.since = now
-		end
-	end
-	regen.lastMana = mana
-	if mana >= maxMana and regen.phase ~= "waiting" then
-		regen.phase = "full"
-	end
+local function ReadableMana()
+	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	if IsSecret(mana) or IsSecret(maxMana) then return nil end
+	return mana, maxMana
 end
 
-local function ExpireWait(isFull, now)
-	if regen.phase ~= "waiting" or now - regen.since < CONFIG.waitSeconds then return end
-	if isFull then
-		regen.phase = "full"
+local function CostsMana(spellID)
+	if IsSecret(spellID) then return true end
+	for _, cost in ipairs(C_Spell.GetSpellPowerCost(spellID) or {}) do
+		if cost.type == MANA and not IsSecret(cost.cost) and cost.cost > 0 then return true end
+	end
+	return false
+end
+
+local function Log(text, now)
+	if now > logUntil then return end
+	local gap = lastLogAt and string.format("%.2fs after previous", now - lastLogAt) or "first"
+	print(PREFIX .. text .. ", " .. gap)
+	lastLogAt = now
+end
+
+local function OnManaSpent(now)
+	regen.waitStart = now
+	Log("mana spent", now)
+end
+
+local function OnManaEvent(now)
+	local mana = ReadableMana()
+	local isTick
+	if mana and regen.lastMana then
+		isTick = mana > regen.lastMana
 	else
-		regen.phase = "ticking"
-		regen.since = regen.lastTickAt or (regen.since + CONFIG.waitSeconds)
+		isTick = not (regen.waitStart and now - regen.waitStart < CONFIG.spendEchoSeconds)
 	end
+	regen.lastMana = mana
+	if isTick then
+		regen.lastTickAt = now
+		Log(mana and "regen tick" or "regen tick (mana hidden)", now)
+	end
+end
+
+local function IsWaiting(now)
+	return regen.waitStart ~= nil and now - regen.waitStart < CONFIG.waitSeconds
+end
+
+local function IsFull(now)
+	local mana, maxMana = ReadableMana()
+	if mana then return mana >= maxMana end
+	local lastActivity = math.max(regen.lastTickAt or 0, (regen.waitStart or 0) + CONFIG.waitSeconds)
+	return now - lastActivity > CONFIG.stalledSeconds
 end
 
 -- Returns nil when there is nothing to show.
 local function SparkProgress(now)
-	if regen.phase == "waiting" then
-		return (now - regen.since) / CONFIG.waitSeconds, CONFIG.spark.waitColor
-	elseif regen.phase == "ticking" then
-		return ((now - regen.since) % CONFIG.tickSeconds) / CONFIG.tickSeconds, CONFIG.spark.tickColor
+	if IsWaiting(now) then
+		return (now - regen.waitStart) / CONFIG.waitSeconds, CONFIG.spark.waitColor
 	end
+	if IsFull(now) then return nil end
+	local anchor = regen.lastTickAt or (regen.waitStart and regen.waitStart + CONFIG.waitSeconds)
+	if not anchor then return nil end
+	return ((now - anchor) % CONFIG.tickSeconds) / CONFIG.tickSeconds, CONFIG.spark.tickColor
 end
 
 local function GetSpark(bar)
@@ -116,21 +151,18 @@ local function GetDruidBar()
 	return druidBar
 end
 
--- Forever returns mana as a secret value while a druid's form uses another power.
--- Secrets error on comparison or math but can be handed to widgets, which draw them.
-local function IsSecret(value)
-	return issecretvalue ~= nil and issecretvalue(value)
-end
-
-local function UpdateDruidBar(mana, maxMana)
-	local bar = GetDruidBar()
-	bar:SetMinMaxValues(0, maxMana)
-	bar:SetValue(mana)
-	bar.text:SetFormattedText("%d / %d", mana, maxMana)
+-- Called on mana events rather than every frame, so the bar steps on ticks
+-- instead of following the client's smoothed value.
+local function UpdateDruidBar()
+	if not (druidBar and druidBar:IsShown()) then return end
+	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	druidBar:SetMinMaxValues(0, maxMana)
+	druidBar:SetValue(mana)
+	druidBar.text:SetFormattedText("%d / %d", mana, maxMana)
 end
 
 local function Refresh()
-	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	local maxMana = UnitPowerMax("player", MANA)
 	local hasMana = (IsSecret(maxMana) or maxMana > 0) and not UnitIsDeadOrGhost("player")
 	local inForm = hasMana and select(2, UnitClass("player")) == "DRUID" and UnitPowerType("player") ~= MANA
 
@@ -140,48 +172,16 @@ local function Refresh()
 		activeBars[1] = PlayerFrame_GetManaBar()
 	end
 	if inForm then
-		-- Shifting costs mana, but the drop may land after mana turns secret, so start the wait here.
-		if not (druidBar and druidBar:IsShown()) then
-			regen.phase, regen.since = "waiting", GetTime()
-		end
-		UpdateDruidBar(mana, maxMana)
 		GetDruidBar():Show()
+		UpdateDruidBar()
 		activeBars[1] = druidBar
 	elseif druidBar then
 		druidBar:Hide()
 	end
-	if not hasMana then
-		regen.phase = "full"
-	end
 end
 
-local logUntil, lastLogTime, lastEventTime = 0, nil, nil
-
-local function LogManaChange(mana, now)
-	if now > logUntil or mana == regen.lastMana then return end
-	local gap = lastLogTime and string.format("%.2fs after previous", now - lastLogTime) or "first"
-	print(string.format("|cff66ccffMana Ticks|r %+d mana, %s", mana - regen.lastMana, gap))
-	lastLogTime = now
-end
-
--- Mana is polled because Forever sends no mana update while a druid is in cat or bear form.
 local function OnUpdate()
-	local now = GetTime()
-	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
-	if druidBar and druidBar:IsShown() then
-		UpdateDruidBar(mana, maxMana)
-	end
-	if IsSecret(mana) or IsSecret(maxMana) then
-		-- Ticks can't be seen, so the spark keeps the cadence learned from the last readable ticks.
-		ExpireWait(false, now)
-	else
-		if maxMana > 0 and mana ~= regen.lastMana then
-			LogManaChange(mana, now)
-			ApplyManaChange(mana, maxMana, now)
-		end
-		ExpireWait(mana >= maxMana, now)
-	end
-	local progress, color = SparkProgress(now)
+	local progress, color = SparkProgress(GetTime())
 	for _, bar in ipairs(activeBars) do
 		if progress then
 			PositionSpark(bar, progress, color)
@@ -200,21 +200,24 @@ driver:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
 driver:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 driver:RegisterUnitEvent("UNIT_DISPLAYPOWER", "player")
 driver:RegisterUnitEvent("UNIT_POWER_UPDATE", "player")
-driver:SetScript("OnEvent", function(_, event, _, powerToken)
-	if event == "UNIT_POWER_UPDATE" then
-		if powerToken == "MANA" and GetTime() <= logUntil then
-			local now = GetTime()
-			local gap = lastEventTime and string.format("%.2fs after previous", now - lastEventTime) or "first"
-			print("|cff66ccffMana Ticks|r mana event, " .. gap)
-			lastEventTime = now
+driver:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+driver:SetScript("OnEvent", function(_, event, ...)
+	local now = GetTime()
+	if event == "UNIT_SPELLCAST_SUCCEEDED" then
+		local _, _, spellID = ...
+		if CostsMana(spellID) then OnManaSpent(now) end
+	elseif event == "UNIT_POWER_UPDATE" then
+		local _, powerToken = ...
+		if powerToken == "MANA" then
+			OnManaEvent(now)
+			UpdateDruidBar()
 		end
-		return
+	else
+		if event == "PLAYER_ENTERING_WORLD" then
+			regen.waitStart, regen.lastTickAt, regen.lastMana = nil, nil, ReadableMana()
+		end
+		Refresh()
 	end
-	if event == "PLAYER_ENTERING_WORLD" then
-		local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
-		if not IsSecret(mana) and not IsSecret(maxMana) then ResetRegen(mana, maxMana, GetTime()) end
-	end
-	Refresh()
 end)
 
 -- An error here would repeat every frame, so stop the loop and report it once.
@@ -223,22 +226,21 @@ driver:SetScript("OnUpdate", function()
 	if not ok then
 		driver:SetScript("OnUpdate", nil)
 		HideSparks()
-		print("|cff66ccffMana Ticks|r stopped after an error: " .. tostring(err))
+		print(PREFIX .. "stopped after an error: " .. tostring(err))
 	end
 end)
 
 SLASH_SAGEQOLMANATICKS1 = "/manaticks"
 SlashCmdList.SAGEQOLMANATICKS = function(msg)
 	if msg:lower():match("^%s*log") then
-		logUntil, lastLogTime, lastEventTime = GetTime() + 30, nil, nil
+		logUntil, lastLogAt = GetTime() + 30, nil
 		local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
-		print(string.format("|cff66ccffMana Ticks|r mana %s, max %s, power type %s, phase %s, frame loop %s.",
+		print(string.format("%smana %s, max %s, power type %s, frame loop %s. Logging for 30 seconds.", PREFIX,
 			IsSecret(mana) and "hidden" or tostring(mana),
 			IsSecret(maxMana) and "hidden" or tostring(maxMana),
-			tostring(UnitPowerType("player")), regen.phase,
+			tostring(UnitPowerType("player")),
 			driver:GetScript("OnUpdate") and "running" or "stopped"))
-		print("|cff66ccffMana Ticks|r logging mana changes and mana events for 30 seconds.")
 	else
-		print("|cff66ccffMana Ticks|r /manaticks log prints each mana change for 30 seconds.")
+		print(PREFIX .. "/manaticks log prints mana spends and regen ticks for 30 seconds.")
 	end
 end

@@ -21,4 +21,4 @@ npm run check
 
 ## Checking regen timing
 
-Type `/manaticks log` in game, spend some mana, and stand still. For 30 seconds it prints each mana change and the time since the previous one. Regen ticks should land about 2 seconds apart.
+Type `/manaticks log` in game, spend some mana, and stand still. For 30 seconds it prints each mana spend and regen tick, with the time since the previous one. It works in forms too, where Forever hides the mana amount. Regen ticks should land about 2 seconds apart.
