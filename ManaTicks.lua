@@ -125,9 +125,20 @@ local function UpdateDruidBar(mana, maxMana)
 	bar.text:SetFormattedText("%d / %d", mana, maxMana)
 end
 
+-- Power reads can come back as secret values, which error when compared.
+local function ReadMana()
+	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	if issecretvalue and (issecretvalue(mana) or issecretvalue(maxMana)) then return nil end
+	return mana, maxMana
+end
+
 local function Refresh()
-	local maxMana = UnitPowerMax("player", MANA)
-	local mana = UnitPower("player", MANA)
+	local mana, maxMana = ReadMana()
+	if not mana then
+		HideSparks()
+		activeBars = {}
+		return
+	end
 	local hasMana = maxMana > 0 and not UnitIsDeadOrGhost("player")
 	local inForm = hasMana and select(2, UnitClass("player")) == "DRUID" and UnitPowerType("player") ~= MANA
 
@@ -160,7 +171,11 @@ end
 -- Mana is polled because Forever did not send a mana update while a druid was in cat or bear form.
 local function OnUpdate()
 	local now = GetTime()
-	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	local mana, maxMana = ReadMana()
+	if not mana then
+		HideSparks()
+		return
+	end
 	if maxMana > 0 and mana ~= regen.lastMana then
 		LogManaChange(mana, now)
 		ApplyManaChange(mana, maxMana, now)
@@ -189,13 +204,21 @@ driver:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 driver:RegisterUnitEvent("UNIT_DISPLAYPOWER", "player")
 driver:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_ENTERING_WORLD" then
-		ResetRegen(UnitPower("player", MANA), UnitPowerMax("player", MANA), GetTime())
-		Refresh()
-	else
-		Refresh()
+		local mana, maxMana = ReadMana()
+		if mana then ResetRegen(mana, maxMana, GetTime()) end
+	end
+	Refresh()
+end)
+
+-- An error here would repeat every frame, so stop the loop and report it once.
+driver:SetScript("OnUpdate", function()
+	local ok, err = pcall(OnUpdate)
+	if not ok then
+		driver:SetScript("OnUpdate", nil)
+		HideSparks()
+		print("|cff66ccffMana Ticks|r stopped after an error: " .. tostring(err))
 	end
 end)
-driver:SetScript("OnUpdate", OnUpdate)
 
 SLASH_SAGEQOLMANATICKS1 = "/manaticks"
 SlashCmdList.SAGEQOLMANATICKS = function(msg)
