@@ -19,14 +19,14 @@ local CONFIG = {
 
 local MANA = Enum.PowerType.Mana
 
-local regen = { phase = "full", since = 0, lastMana = 0, lastTick = nil }
+local regen = { phase = "full", since = 0, lastMana = 0, lastTickAt = nil }
 local sparks = {}
 local druidBar
 local activeBars = {}
 
 local function ResetRegen(mana, maxMana, now)
 	regen.lastMana = mana
-	regen.lastTick = nil
+	regen.lastTickAt = nil
 	regen.phase = mana >= maxMana and "full" or "ticking"
 	regen.since = now
 end
@@ -35,11 +35,9 @@ local function ApplyManaChange(mana, maxMana, now)
 	if mana < regen.lastMana then
 		regen.phase = "waiting"
 		regen.since = now
-		regen.lastTick = nil
 	elseif mana > regen.lastMana then
-		if regen.phase == "waiting" and now - regen.since < CONFIG.waitSeconds then
-			regen.lastTick = now
-		else
+		regen.lastTickAt = now
+		if regen.phase ~= "waiting" or now - regen.since >= CONFIG.waitSeconds then
 			regen.phase = "ticking"
 			regen.since = now
 		end
@@ -50,13 +48,13 @@ local function ApplyManaChange(mana, maxMana, now)
 	end
 end
 
-local function ExpireWait(mana, maxMana, now)
+local function ExpireWait(isFull, now)
 	if regen.phase ~= "waiting" or now - regen.since < CONFIG.waitSeconds then return end
-	if mana >= maxMana then
+	if isFull then
 		regen.phase = "full"
 	else
 		regen.phase = "ticking"
-		regen.since = regen.lastTick or (regen.since + CONFIG.waitSeconds)
+		regen.since = regen.lastTickAt or (regen.since + CONFIG.waitSeconds)
 	end
 end
 
@@ -118,28 +116,22 @@ local function GetDruidBar()
 	return druidBar
 end
 
+-- Forever returns mana as a secret value while a druid's form uses another power.
+-- Secrets error on comparison or math but can be handed to widgets, which draw them.
+local function IsSecret(value)
+	return issecretvalue ~= nil and issecretvalue(value)
+end
+
 local function UpdateDruidBar(mana, maxMana)
 	local bar = GetDruidBar()
-	bar:SetMinMaxValues(0, math.max(maxMana, 1))
+	bar:SetMinMaxValues(0, maxMana)
 	bar:SetValue(mana)
 	bar.text:SetFormattedText("%d / %d", mana, maxMana)
 end
 
--- Power reads can come back as secret values, which error when compared.
-local function ReadMana()
-	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
-	if issecretvalue and (issecretvalue(mana) or issecretvalue(maxMana)) then return nil end
-	return mana, maxMana
-end
-
 local function Refresh()
-	local mana, maxMana = ReadMana()
-	if not mana then
-		HideSparks()
-		activeBars = {}
-		return
-	end
-	local hasMana = maxMana > 0 and not UnitIsDeadOrGhost("player")
+	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	local hasMana = (IsSecret(maxMana) or maxMana > 0) and not UnitIsDeadOrGhost("player")
 	local inForm = hasMana and select(2, UnitClass("player")) == "DRUID" and UnitPowerType("player") ~= MANA
 
 	HideSparks()
@@ -148,6 +140,10 @@ local function Refresh()
 		activeBars[1] = PlayerFrame_GetManaBar()
 	end
 	if inForm then
+		-- Shifting costs mana, but the drop may land after mana turns secret, so start the wait here.
+		if not (druidBar and druidBar:IsShown()) then
+			regen.phase, regen.since = "waiting", GetTime()
+		end
 		UpdateDruidBar(mana, maxMana)
 		GetDruidBar():Show()
 		activeBars[1] = druidBar
@@ -168,22 +164,23 @@ local function LogManaChange(mana, now)
 	lastLogTime = now
 end
 
--- Mana is polled because Forever did not send a mana update while a druid was in cat or bear form.
+-- Mana is polled because Forever sends no mana update while a druid is in cat or bear form.
 local function OnUpdate()
 	local now = GetTime()
-	local mana, maxMana = ReadMana()
-	if not mana then
-		HideSparks()
-		return
+	local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+	if druidBar and druidBar:IsShown() then
+		UpdateDruidBar(mana, maxMana)
 	end
-	if maxMana > 0 and mana ~= regen.lastMana then
-		LogManaChange(mana, now)
-		ApplyManaChange(mana, maxMana, now)
-		if druidBar and druidBar:IsShown() then
-			UpdateDruidBar(mana, maxMana)
+	if IsSecret(mana) or IsSecret(maxMana) then
+		-- Ticks can't be seen, so the spark keeps the cadence learned from the last readable ticks.
+		ExpireWait(false, now)
+	else
+		if maxMana > 0 and mana ~= regen.lastMana then
+			LogManaChange(mana, now)
+			ApplyManaChange(mana, maxMana, now)
 		end
+		ExpireWait(mana >= maxMana, now)
 	end
-	ExpireWait(mana, maxMana, now)
 	local progress, color = SparkProgress(now)
 	for _, bar in ipairs(activeBars) do
 		if progress then
@@ -204,8 +201,8 @@ driver:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 driver:RegisterUnitEvent("UNIT_DISPLAYPOWER", "player")
 driver:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_ENTERING_WORLD" then
-		local mana, maxMana = ReadMana()
-		if mana then ResetRegen(mana, maxMana, GetTime()) end
+		local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+		if not IsSecret(mana) and not IsSecret(maxMana) then ResetRegen(mana, maxMana, GetTime()) end
 	end
 	Refresh()
 end)
