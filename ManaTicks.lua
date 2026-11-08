@@ -155,7 +155,7 @@ local function Refresh()
 	end
 end
 
-local logUntil, lastLogTime = 0, nil
+local logUntil, lastLogTime, lastEventTime = 0, nil, nil
 
 local function LogManaChange(mana, now)
 	if now > logUntil or mana == regen.lastMana then return end
@@ -199,7 +199,17 @@ driver:RegisterEvent("PLAYER_UNGHOST")
 driver:RegisterEvent("UPDATE_SHAPESHIFT_FORM")
 driver:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 driver:RegisterUnitEvent("UNIT_DISPLAYPOWER", "player")
-driver:SetScript("OnEvent", function(_, event)
+driver:RegisterUnitEvent("UNIT_POWER_UPDATE", "player")
+driver:SetScript("OnEvent", function(_, event, _, powerToken)
+	if event == "UNIT_POWER_UPDATE" then
+		if powerToken == "MANA" and GetTime() <= logUntil then
+			local now = GetTime()
+			local gap = lastEventTime and string.format("%.2fs after previous", now - lastEventTime) or "first"
+			print("|cff66ccffMana Ticks|r mana event, " .. gap)
+			lastEventTime = now
+		end
+		return
+	end
 	if event == "PLAYER_ENTERING_WORLD" then
 		local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
 		if not IsSecret(mana) and not IsSecret(maxMana) then ResetRegen(mana, maxMana, GetTime()) end
@@ -220,8 +230,14 @@ end)
 SLASH_SAGEQOLMANATICKS1 = "/manaticks"
 SlashCmdList.SAGEQOLMANATICKS = function(msg)
 	if msg:lower():match("^%s*log") then
-		logUntil, lastLogTime = GetTime() + 30, nil
-		print("|cff66ccffMana Ticks|r logging mana changes for 30 seconds.")
+		logUntil, lastLogTime, lastEventTime = GetTime() + 30, nil, nil
+		local mana, maxMana = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+		print(string.format("|cff66ccffMana Ticks|r mana %s, max %s, power type %s, phase %s, frame loop %s.",
+			IsSecret(mana) and "hidden" or tostring(mana),
+			IsSecret(maxMana) and "hidden" or tostring(maxMana),
+			tostring(UnitPowerType("player")), regen.phase,
+			driver:GetScript("OnUpdate") and "running" or "stopped"))
+		print("|cff66ccffMana Ticks|r logging mana changes and mana events for 30 seconds.")
 	else
 		print("|cff66ccffMana Ticks|r /manaticks log prints each mana change for 30 seconds.")
 	end
